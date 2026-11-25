@@ -1080,13 +1080,37 @@ pub(crate) fn encode_snapshot_at_inner(
     doc: &LoroDoc,
     frontiers: &Frontiers,
 ) -> Result<Snapshot, LoroEncodeError> {
+    if !doc.txn.is_locked() {
+        return Err(LoroError::TransactionError(
+            "checkout requires the transaction mutex to be held"
+                .to_string()
+                .into_boxed_str(),
+        )
+        .into());
+    }
     let was_detached = doc.is_detached();
-    let version_before_start = doc.state_frontiers().clone();
-    doc._checkout_without_emitting(frontiers, true, false)
-        .map_err(LoroEncodeError::from)?;
+    // Hold the op log, the state and the calculator until the state is back, so
+    // a reader on another thread never sees the state at `frontiers`.
+    let oplog = doc.oplog().lock();
+    let mut state = doc.app_state().lock();
+    let mut calc = doc.diff_calculator.lock();
+    let checkout = |state: &mut DocState,
+                    calc: &mut crate::diff_calc::DiffCalculator,
+                    to: &Frontiers,
+                    shrink: bool| {
+        doc.checkout_locked(
+            &oplog,
+            state,
+            calc,
+            to,
+            shrink,
+            "checkout".into(),
+            crate::event::EventTriggerKind::Checkout,
+        )
+    };
+    let version_before_start = state.frontiers.clone();
+    checkout(&mut state, &mut calc, frontiers, true).map_err(LoroEncodeError::from)?;
     let result = 'block: {
-        let oplog = doc.oplog().lock();
-        let mut state = doc.app_state().lock();
         let is_shallow = state.store.shallow_root_store().is_some();
         if is_shallow {
             break 'block Err(LoroEncodeError::from(LoroError::NotImplemented(
@@ -1144,11 +1168,10 @@ pub(crate) fn encode_snapshot_at_inner(
             shallow_root_state_bytes: Bytes::new(),
         })
     };
-    let restore_result = doc
-        ._checkout_without_emitting(&version_before_start, false, false)
+    let restore_result = checkout(&mut state, &mut calc, &version_before_start, false)
         .map_err(LoroEncodeError::from);
     doc.set_detached(was_detached);
-    doc.app_state().lock().take_events();
+    state.take_events();
 
     let snapshot = result?;
     restore_result?;

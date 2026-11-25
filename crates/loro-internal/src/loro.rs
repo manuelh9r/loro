@@ -2415,23 +2415,32 @@ impl LoroDoc {
         let _exclusive = self.txn.lock_exclusive();
         let (options, txn) = self.implicit_commit_then_stop();
         let was_detached = self.is_detached();
-        let old_frontiers = self.state_frontiers();
-        let was_recording = {
-            let mut state = self.state.lock();
-            let is_recording = state.is_recording();
-            state.stop_and_clear_recording();
-            is_recording
+        // Hold the op log, the state and the calculator from the first checkout
+        // until the state is back: a reader on another thread waits instead of
+        // seeing version `a` or `b`.
+        let oplog = self.oplog.lock();
+        let mut state = self.state.lock();
+        let mut calc = self.diff_calculator.lock();
+        let checkout = |state: &mut DocState, calc: &mut DiffCalculator, to: &Frontiers, shrink| {
+            self.checkout_locked(
+                &oplog,
+                state,
+                calc,
+                to,
+                shrink,
+                "checkout".into(),
+                EventTriggerKind::Checkout,
+            )
         };
+        let old_frontiers = state.frontiers.clone();
+        let was_recording = state.is_recording();
+        state.stop_and_clear_recording();
         let result = (|| {
-            self._checkout_without_emitting(a, true, false)?;
-            {
-                let mut state = self.state.lock();
-                state.start_recording();
-                state.set_record_changes_only(changes_only);
-            }
-            let checkout = self._checkout_without_emitting(b, true, false);
-            let mut state = self.state.lock();
-            let e = checkout.map(|()| state.take_events());
+            checkout(&mut state, &mut calc, a, true)?;
+            state.start_recording();
+            state.set_record_changes_only(changes_only);
+            let to_b = checkout(&mut state, &mut calc, b, true);
+            let e = to_b.map(|()| state.take_events());
             state.set_record_changes_only(false);
             let e = e?;
             state.stop_and_clear_recording();
@@ -2439,11 +2448,13 @@ impl LoroDoc {
         })();
 
         // Always restore state regardless of whether diff calculation succeeded
-        self._checkout_without_emitting(&old_frontiers, false, false)
-            .unwrap();
+        checkout(&mut state, &mut calc, &old_frontiers, false).unwrap();
         if was_recording {
-            self.state.lock().start_recording();
+            state.start_recording();
         }
+        drop(calc);
+        drop(state);
+        drop(oplog);
         // Attach and renew before the txn lock is released: the restoring
         // checkout leaves the doc detached, and an edit that takes the lock next
         // must find it attached, with a transaction to write into.
@@ -4371,20 +4382,49 @@ impl LoroDoc {
                     .into_boxed_str(),
             ));
         }
+        let oplog = self.oplog.lock();
+        let mut state = self.state.lock();
+        let mut calc = self.diff_calculator.lock();
+        self.checkout_locked(
+            &oplog,
+            &mut state,
+            &mut calc,
+            frontiers,
+            to_shrink_frontiers,
+            origin,
+            triggered_by,
+        )
+    }
+
+    /// The checkout of [`Self::_checkout_without_emitting_with_event`], on locks
+    /// the caller holds. A caller that checks the state out to another version
+    /// and back (`diff`, `fork_at`) holds them for the whole round trip, so a
+    /// reader on another thread waits instead of seeing the other version.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn checkout_locked(
+        &self,
+        oplog: &OpLog,
+        state: &mut DocState,
+        calc: &mut DiffCalculator,
+        frontiers: &Frontiers,
+        to_shrink_frontiers: bool,
+        origin: InternalString,
+        triggered_by: EventTriggerKind,
+    ) -> Result<(), LoroError> {
         // Barriers end the auto-commit transaction, so this is a manual one.
-        if self.state.lock().is_in_txn() {
+        if state.is_in_txn() {
             return Err(LoroError::TransactionError(
                 "cannot check out while a transaction is open; commit it first"
                     .to_string()
                     .into_boxed_str(),
             ));
         }
-        let from_frontiers = self.state_frontiers();
+        let from_frontiers = state.frontiers.clone();
         loro_common::info!(
             "checkout from={:?} to={:?} cur_vv={:?}",
             from_frontiers,
             frontiers,
-            self.oplog_vv()
+            oplog.vv()
         );
 
         if &from_frontiers == frontiers {
@@ -4394,7 +4434,6 @@ impl LoroDoc {
             return Ok(());
         }
 
-        let oplog = self.oplog.lock();
         if oplog.dag.is_before_shallow_root(frontiers) {
             return Err(LoroError::SwitchToVersionBeforeShallowRoot);
         }
@@ -4409,8 +4448,6 @@ impl LoroDoc {
             return Ok(());
         }
 
-        let mut state = self.state.lock();
-        let mut calc = self.diff_calculator.lock();
         for i in frontiers.iter() {
             if !oplog.dag.contains(i) {
                 return Err(LoroError::FrontiersNotFound(i));
@@ -4435,14 +4472,8 @@ impl LoroDoc {
             ));
         };
 
-        let (diff, diff_mode) = calc.try_calc_diff_internal(
-            &oplog,
-            &before,
-            &state.frontiers,
-            after,
-            &frontiers,
-            None,
-        )?;
+        let (diff, diff_mode) =
+            calc.try_calc_diff_internal(oplog, &before, &state.frontiers, after, &frontiers, None)?;
         self.set_detached(true);
         // A forward checkout can revive map/list children queried while state
         // lagged behind history, even when the public event is an import.
@@ -4461,8 +4492,7 @@ impl LoroDoc {
         // the history of the target version. Checking out an older version keeps
         // whatever roots the state already had.
         if after == oplog.vv() {
-            materialize_touched_roots(&mut state, &calc, &oplog.arena);
-            drop(calc);
+            materialize_touched_roots(state, calc, &oplog.arena);
         }
 
         Ok(())
