@@ -310,11 +310,18 @@ impl ContainerWrapper {
         self.try_get_value(idx, ctx).unwrap()
     }
 
-    /// Return no answer when a map would need decoding. In particular, do not
-    /// initialize a lazy map's OnceCell just to ask whether its value is empty.
-    pub(super) fn resident_map_is_empty(&self) -> Option<bool> {
+    /// Whether the container's value is empty, answered from decoded state
+    /// without building the value. Return no answer when the container would
+    /// need decoding. In particular, do not initialize a lazy map's OnceCell
+    /// just to ask whether its value is empty.
+    pub(super) fn resident_is_empty(&self) -> Option<bool> {
         match &self.data {
             ContainerData::State(State::MapState(map)) => Some(map.len() == 0),
+            ContainerData::State(State::ListState(list)) => Some(list.len() == 0),
+            ContainerData::State(State::MovableListState(list)) => Some(list.len() == 0),
+            // A tree's value lists the nodes under the root.
+            ContainerData::State(State::TreeState(tree)) => Some(tree.is_empty()),
+            ContainerData::State(State::RichtextState(text)) => text.decoded_text_is_empty(),
             ContainerData::Lazy(lazy) => lazy.value.as_ref()?.as_map().map(BTreeMap::is_empty),
             _ => None,
         }

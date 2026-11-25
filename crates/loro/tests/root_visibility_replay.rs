@@ -311,3 +311,77 @@ fn random_peers_agree_with_replay_of_their_history() {
         .collect();
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+/// Which root of a name `get_value` and `get_deep_value` show depends on
+/// whether each root is empty: an empty root does not hide a non-empty root of
+/// another kind with the same name. A doc with decoded states answers that from
+/// the states; a doc loaded from a snapshot, before anything decodes it, builds
+/// the values. Both must choose the same roots.
+#[test]
+fn decoded_and_snapshot_loaded_docs_choose_the_same_roots() {
+    let a = LoroDoc::new();
+    a.set_peer_id(1).unwrap();
+    a.config_text_style(loro::StyleConfigMap::default_rich_text_config());
+    // A root of each kind that ends empty (a text keeps its mark's style
+    // anchors), sharing its name with a non-empty map created before or after.
+    let empty_root = |name: &str| match name.split('_').next().unwrap() {
+        "tree" => {
+            let tree = a.get_tree(name);
+            let node = tree.create(None).unwrap();
+            tree.delete(node).unwrap();
+        }
+        "list" => {
+            a.get_list(name).push(1).unwrap();
+            a.get_list(name).delete(0, 1).unwrap();
+        }
+        "movable" => {
+            a.get_movable_list(name).push(1).unwrap();
+            a.get_movable_list(name).delete(0, 1).unwrap();
+        }
+        "text" => {
+            let text = a.get_text(name);
+            text.insert(0, "abc").unwrap();
+            text.mark(0..3, "bold", true).unwrap();
+            text.delete(0, 3).unwrap();
+        }
+        _ => unreachable!(),
+    };
+    for kind in ["tree", "list", "movable", "text"] {
+        let first = format!("{kind}_empty_first");
+        empty_root(&first);
+        a.get_map(first.as_str()).insert("k", 1).unwrap();
+        let last = format!("{kind}_empty_last");
+        a.get_map(last.as_str()).insert("k", 1).unwrap();
+        empty_root(&last);
+        // And the other way round: a non-empty root of this kind, an empty map.
+        let full = format!("{kind}_full");
+        match kind {
+            "tree" => drop(a.get_tree(full.as_str()).create(None).unwrap()),
+            "list" => a.get_list(full.as_str()).push(1).unwrap(),
+            "movable" => a.get_movable_list(full.as_str()).push(1).unwrap(),
+            _ => a.get_text(full.as_str()).insert(0, "y").unwrap(),
+        }
+        a.get_map(full.as_str()).insert("k", 1).unwrap();
+        a.get_map(full.as_str()).delete("k").unwrap();
+    }
+    a.commit();
+
+    let snapshot = a.export(ExportMode::Snapshot).unwrap();
+    for hide in [false, true] {
+        a.set_hide_empty_root_containers(hide);
+        let loaded = LoroDoc::from_snapshot(&snapshot).unwrap();
+        loaded.set_hide_empty_root_containers(hide);
+        assert_eq!(
+            a.get_value().to_json_value(),
+            loaded.get_value().to_json_value(),
+            "get_value, hide_empty_root_containers = {hide}"
+        );
+        let loaded = LoroDoc::from_snapshot(&snapshot).unwrap();
+        loaded.set_hide_empty_root_containers(hide);
+        assert_eq!(
+            value(&a),
+            value(&loaded),
+            "get_deep_value, hide_empty_root_containers = {hide}"
+        );
+    }
+}

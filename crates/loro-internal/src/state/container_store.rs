@@ -156,9 +156,9 @@ impl ContainerStore {
             .with_container_for_read(idx, |c| c.get_value(idx, ctx!(self)))
     }
 
-    /// Query only already resident map metadata, without decoding or retaining a value.
-    pub(crate) fn resident_map_is_empty(&self, idx: ContainerIdx) -> Option<bool> {
-        self.store.resident_map_is_empty(idx)
+    /// Query only already resident container state, without decoding or retaining a value.
+    pub(crate) fn resident_is_empty(&self, idx: ContainerIdx) -> Option<bool> {
+        self.store.resident_is_empty(idx)
     }
 
     pub(crate) fn get_value_ephemeral(&mut self, idx: ContainerIdx) -> Option<LoroValue> {

@@ -90,6 +90,15 @@ impl RichtextState {
         self.state.get_mut().to_plain_string()
     }
 
+    /// Whether the text value is `""`, if the state is already decoded; `None`
+    /// rather than decoding a lazily loaded state.
+    pub(crate) fn decoded_text_is_empty(&self) -> Option<bool> {
+        match &self.state {
+            LazyLoad::Src(_) => None,
+            LazyLoad::Dst(state) => Some(state.len_utf8() == 0),
+        }
+    }
+
     #[allow(unused)]
     #[inline(always)]
     pub(crate) fn is_empty(&self) -> bool {
