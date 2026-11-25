@@ -718,6 +718,15 @@ impl LoroDoc {
         !self.is_detached() || self.config.detached_editing()
     }
 
+    /// [`Self::can_edit`] for a caller that holds the writer gate. Another
+    /// thread may still hold the txn lock with the state checked out (a `diff`,
+    /// a `fork_at`, an import) and the doc detached for the moment, so wait for
+    /// it first. While the gate is held, no other thread takes the txn lock.
+    pub(crate) fn can_edit_after_others(&self) -> bool {
+        drop(self.txn.lock());
+        self.can_edit()
+    }
+
     pub fn is_detached_editing_enabled(&self) -> bool {
         self.config.detached_editing()
     }
@@ -2027,7 +2036,7 @@ impl LoroDoc {
         element_remap: &mut crate::undo::movable_list::ElementRemap,
     ) -> LoroResult<CommitWhenDrop<'_>> {
         let _exclusive = self.txn.lock_exclusive();
-        if !self.can_edit() {
+        if !self.can_edit_after_others() {
             return Err(LoroError::EditWhenDetached);
         }
 
@@ -2491,7 +2500,11 @@ impl LoroDoc {
         skip_unreachable: bool,
         align_revived_mergeable: bool,
     ) -> LoroResult<()> {
-        if !self.can_edit() {
+        // The batch is applied op by op. The writer gate keeps other threads'
+        // edits, commits, checkouts and imports out until it is done, so a
+        // failed batch can always be rolled back.
+        let _exclusive = self.txn.lock_exclusive();
+        if !self.can_edit_after_others() {
             return Err(LoroError::EditWhenDetached);
         }
 

@@ -1,6 +1,6 @@
 # `apply_diff` / `revert_to` Atomicity
 
-Verified against code 2026-09-30 (loro-dev/loro#1154).
+Verified against code 2026-11-24 (loro-dev/loro#1154).
 
 `LoroDoc::apply_diff` and `revert_to` (and loro-crdt `applyDiff` / `revertTo`)
 are all or nothing. When they return `Err`, the doc's state, history, version
@@ -89,10 +89,19 @@ anything keyed by them must not survive:
 
 ## Other threads
 
-The handlers lock the transaction per op, so another thread can edit or commit
-while a batch runs. Rolling back would then drop that thread's edits, so the
-batch is left partly applied (the behavior before #1154) and a warning is
-logged:
+The handlers lock the transaction per op, so without more another thread could
+edit or commit between two ops of a batch. `apply_diff_all_or_nothing` holds
+the writer gate (`LoroMutex::lock_exclusive`, see
+[undo atomicity](undo-atomicity.md)) for the whole batch: other threads' edits,
+commits, imports, exports, diffs and checkouts wait until the batch is applied
+or rolled back. Its first check is `can_edit_after_others`: a thread that holds
+the txn lock with the state checked out (`diff`, `fork_at`) has the doc
+detached for that moment, so the check waits for it instead of returning
+`EditWhenDetached`.
+
+If another thread's edits still end up in the batch's transaction, rolling
+back would drop them, so the batch is left partly applied (the behavior before
+#1154) and a warning is logged:
 
 - another thread's op in the scoped transaction sets `foreign_ops` (checked in
   `Transaction::apply_local_op` by a thread-local address);

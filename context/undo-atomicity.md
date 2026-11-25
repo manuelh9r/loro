@@ -41,6 +41,12 @@ writers or undos. Read-only queries may still observe intermediate state; this
 is writer serialization, not snapshot isolation for concurrent readers.
 Tests: `lock::txn_gate_tests` (nesting, waiting writers, panic recovery).
 
+The gate is also held by `with_barrier` (imports, exports, checkouts and the
+other implicit commits), `diff` and `apply_diff`. Undo and `apply_diff` check
+`can_edit_after_others`, not `can_edit`: another thread may still hold the txn
+lock with the state checked out and the doc detached for that moment, so they
+wait for it once; while they hold the gate, no new checkout can start.
+
 Undo must own an intact rollback scope. Losing it or failing rollback panics:
 returning an ordinary error with partly changed state would make retry unsafe.
 Native MovableList application errors remain `LoroError`s and enter this same
