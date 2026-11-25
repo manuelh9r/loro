@@ -1297,6 +1297,32 @@ fn mergeable_too_deep_error(parent: &ContainerID) -> LoroError {
     )
 }
 
+/// Records in `remap` that the diff's container `old` is `new` in this document, unless that would
+/// make a cycle. Applying a diff to a document of the same peer whose next counters are those of
+/// the diff's new containers (a rebuilt copy that replays local changes) creates a container under
+/// the very id the diff names, or under the id of another container of the diff. A cycle in
+/// `remap` makes every lookup that follows it loop for ever, so nothing is recorded for the same
+/// id, or when `new` already leads back to `old`.
+pub(crate) fn insert_container_remap(
+    remap: &mut FxHashMap<ContainerID, ContainerID>,
+    old: ContainerID,
+    new: ContainerID,
+) {
+    if old == new {
+        return;
+    }
+    let mut cur = &new;
+    // Bounded, in case a remap built elsewhere holds a cycle already.
+    for _ in 0..=remap.len() {
+        match remap.get(cur) {
+            Some(next) if *next == old => return,
+            Some(next) => cur = next,
+            None => break,
+        }
+    }
+    remap.insert(old, new);
+}
+
 impl Handler {
     fn apply_map_container_diff_value(
         map: &MapHandler,
@@ -1455,9 +1481,7 @@ impl Handler {
         // In this method we will not clone the values of the containers if
         // they are remapped. It's the caller's duty to do so
         let on_container_remap = &mut |old_id, new_id| {
-            if old_id != new_id {
-                container_remap.insert(old_id, new_id);
-            }
+            insert_container_remap(container_remap, old_id, new_id);
         };
         match self {
             Self::Map(x) => {
@@ -1598,7 +1622,8 @@ impl Handler {
                                     if x.create_at_with_target_for_apply_diff(
                                         parent, position, new_target,
                                     )? {
-                                        container_remap.insert(
+                                        insert_container_remap(
+                                            container_remap,
                                             target.associated_meta_container(),
                                             new_target.associated_meta_container(),
                                         );
@@ -1634,7 +1659,8 @@ impl Handler {
                                     if x.create_at_with_target_for_apply_diff(
                                         parent, position, new_target,
                                     )? {
-                                        container_remap.insert(
+                                        insert_container_remap(
+                                            container_remap,
                                             target.associated_meta_container(),
                                             new_target.associated_meta_container(),
                                         );
