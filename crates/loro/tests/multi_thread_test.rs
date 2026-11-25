@@ -543,4 +543,145 @@ mod loom_test {
             assert_eq!(history, f.history);
         });
     }
+
+    /// A doc with the text "ab" and the version where it was "a".
+    fn doc_with_an_older_version() -> (LoroDoc, loro::Frontiers) {
+        let doc = LoroDoc::new();
+        doc.get_text("text").insert(0, "a").unwrap();
+        doc.commit();
+        let v1 = doc.oplog_frontiers();
+        doc.get_text("text").insert(1, "b").unwrap();
+        doc.commit();
+        (doc, v1)
+    }
+
+    /// `diff` checks the state out and back; the restoring checkout leaves the
+    /// doc detached until `diff` attaches it. An edit on another thread used to
+    /// take the txn lock in between and fail with `AutoCommitNotStarted`.
+    #[test]
+    fn an_edit_while_another_thread_diffs_does_not_fail() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let (doc, v1) = doc_with_an_older_version();
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                d.diff(&Default::default(), &v1).unwrap();
+            });
+            doc.get_text("text").insert(0, "x").unwrap();
+            doc.commit();
+            h.join().unwrap();
+            assert!(!doc.is_detached());
+            assert_eq!(doc.get_text("text").to_string(), "xab");
+        });
+    }
+
+    /// Readers only take the state lock, so they used to see the versions
+    /// `diff` checks the state out to.
+    #[test]
+    fn a_read_while_another_thread_diffs_sees_the_current_version() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let (doc, v1) = doc_with_an_older_version();
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                d.diff(&Default::default(), &v1).unwrap();
+            });
+            assert_eq!(doc.get_text("text").to_string(), "ab");
+            h.join().unwrap();
+        });
+    }
+
+    /// Same for `fork_at`, which checks the state out to the fork's version.
+    #[test]
+    fn a_read_while_another_thread_forks_sees_the_current_version() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let (doc, v1) = doc_with_an_older_version();
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                let fork = d.fork_at(&v1).unwrap();
+                assert_eq!(fork.get_text("text").to_string(), "a");
+            });
+            assert_eq!(doc.get_text("text").to_string(), "ab");
+            h.join().unwrap();
+        });
+    }
+
+    /// `apply_diff` used to check the detached flag without any lock, and saw
+    /// the flag of another thread's checkout.
+    #[test]
+    fn apply_diff_while_another_thread_diffs_does_not_fail() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let src = LoroDoc::new();
+            src.get_text("text").insert(0, "x").unwrap();
+            src.commit();
+            let batch = src
+                .diff(&Default::default(), &src.oplog_frontiers())
+                .unwrap();
+            let (doc, v1) = doc_with_an_older_version();
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                d.diff(&Default::default(), &v1).unwrap();
+            });
+            doc.apply_diff(batch).unwrap();
+            doc.commit();
+            h.join().unwrap();
+            assert_eq!(doc.get_text("text").to_string(), "xab");
+        });
+    }
+
+    /// An export's barrier used to release the txn lock before it renewed the
+    /// transaction; `set_next_commit_message` in between did nothing.
+    #[test]
+    fn the_next_commit_message_survives_another_threads_export() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let (doc, _) = doc_with_an_older_version();
+            let peer = doc.peer_id();
+            let id = loro::ID::new(peer, *doc.oplog_vv().get(&peer).unwrap());
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                d.export(ExportMode::all_updates()).unwrap();
+            });
+            doc.set_next_commit_message("m");
+            doc.get_text("text").insert(0, "x").unwrap();
+            doc.commit();
+            h.join().unwrap();
+            assert_eq!(doc.get_change(id).unwrap().message(), "m");
+        });
+    }
+
+    /// The auto-commit transaction is shared, so an export on another thread
+    /// can commit the first of two edits on its own. Inside `exclusive` the
+    /// edits and their commit form one change.
+    #[test]
+    fn edits_in_exclusive_form_one_change_while_another_thread_exports() {
+        let mut builder = loom::model::Builder::new();
+        builder.max_branches = 10_000;
+        builder.check(|| {
+            let (doc, _) = doc_with_an_older_version();
+            let peer = doc.peer_id();
+            let id = loro::ID::new(peer, *doc.oplog_vv().get(&peer).unwrap());
+            let d = doc.clone();
+            let h = loom::thread::spawn(move || {
+                d.export(ExportMode::all_updates()).unwrap();
+            });
+            doc.exclusive(|| {
+                let text = doc.get_text("text");
+                text.insert(0, "x").unwrap();
+                text.insert(0, "y").unwrap();
+                doc.commit_with(loro::CommitOptions::new().commit_msg("xy"));
+            });
+            h.join().unwrap();
+            let change = doc.get_change(id).unwrap();
+            assert_eq!(change.message(), "xy");
+            assert_eq!(change.len, 2);
+        });
+    }
 }
