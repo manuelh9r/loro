@@ -261,7 +261,11 @@ impl MovableListHandler {
                                         cursor,
                                         Handler::new_unattached(id.container_type())?,
                                     )?;
-                                    container_remap.insert(id, new_handler.id());
+                                    crate::handler::insert_container_remap(
+                                        container_remap,
+                                        id,
+                                        new_handler.id(),
+                                    );
                                     cursor += 1;
                                 }
                             }
