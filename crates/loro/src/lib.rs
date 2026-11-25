@@ -951,6 +951,35 @@ impl LoroDoc {
         self.doc.is_detached()
     }
 
+    /// Runs `f` while no other thread can edit, commit, import, export, diff or
+    /// check out this document; they wait until `f` returns.
+    ///
+    /// The auto-commit transaction is shared by all threads, and an import or
+    /// export on any thread commits it. Inside `f`, the edits this thread makes
+    /// and the commit it makes form one change with its message and origin,
+    /// and reads see one version. Nested calls on the same thread are allowed,
+    /// and subscribers that run on this thread can still use the document.
+    ///
+    /// `f` must not wait for another thread that uses this document, or both
+    /// wait forever.
+    ///
+    /// ```
+    /// use loro::{CommitOptions, LoroDoc};
+    ///
+    /// let doc = LoroDoc::new();
+    /// doc.exclusive(|| {
+    ///     let text = doc.get_text("text");
+    ///     text.insert(0, "Hello").unwrap();
+    ///     text.insert(5, " world").unwrap();
+    ///     doc.commit_with(CommitOptions::new().commit_msg("greeting"));
+    /// });
+    /// assert_eq!(doc.get_text("text").to_string(), "Hello world");
+    /// ```
+    #[inline]
+    pub fn exclusive<R>(&self, f: impl FnOnce() -> R) -> R {
+        self.doc.exclusive(f)
+    }
+
     /// Create a new `LoroDoc` from a snapshot.
     ///
     /// The snapshot is created via [`LoroDoc::export`] with [`ExportMode::Snapshot`].

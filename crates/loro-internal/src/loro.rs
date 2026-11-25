@@ -727,6 +727,16 @@ impl LoroDoc {
         self.can_edit()
     }
 
+    /// Runs `f` while no other thread can edit, commit, import, export, diff or
+    /// check out this document; they wait until `f` returns. See
+    /// `loro::LoroDoc::exclusive`.
+    pub fn exclusive<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _exclusive = self.txn.lock_exclusive();
+        // Let an operation that already holds the txn lock finish.
+        drop(self.txn.lock());
+        f()
+    }
+
     pub fn is_detached_editing_enabled(&self) -> bool {
         self.config.detached_editing()
     }

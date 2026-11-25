@@ -41,8 +41,9 @@ writers or undos. Read-only queries may still observe intermediate state; this
 is writer serialization, not snapshot isolation for concurrent readers.
 Tests: `lock::txn_gate_tests` (nesting, waiting writers, panic recovery).
 
-The gate is also held by `with_barrier` (imports, exports, checkouts and the
-other implicit commits), `diff` and `apply_diff`. Undo and `apply_diff` check
+The gate is also held by `LoroDoc::exclusive` (public), `with_barrier`
+(imports, exports, checkouts and the other implicit commits), `diff` and
+`apply_diff`. Undo and `apply_diff` check
 `can_edit_after_others`, not `can_edit`: another thread may still hold the txn
 lock with the state checked out and the doc detached for that moment, so they
 wait for it once; while they hold the gate, no new checkout can start.
