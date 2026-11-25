@@ -134,6 +134,23 @@ pub struct LoroDoc {
     inner: std::mem::ManuallyDrop<Arc<LoroDocInner>>,
 }
 
+// `LoroDoc` is `Send` and `Sync` because its only field, an `Arc<LoroDocInner>`, is; the
+// assertion below checks that `LoroDocInner` is. The impls are explicit so that the compiler
+// stops at `LoroDoc` when it proves a downstream type `Send` or `Sync`. Derived, the proof walks
+// the whole cycle of handlers, documents, states, observers and diffs, which is deeper than the
+// default recursion limit of 128 for futures that hold a handler.
+//
+// SAFETY: `LoroDoc` holds nothing but the `Arc<LoroDocInner>` (`ManuallyDrop` changes only when
+// it is dropped), and `Arc<T>` is `Send` and `Sync` when `T` is `Send` and `Sync`.
+unsafe impl Send for LoroDoc {}
+// SAFETY: see `Send` above.
+unsafe impl Sync for LoroDoc {}
+
+const _: () = {
+    const fn send_and_sync<T: Send + Sync>() {}
+    send_and_sync::<LoroDocInner>();
+};
+
 impl Clone for LoroDoc {
     #[inline]
     fn clone(&self) -> Self {
