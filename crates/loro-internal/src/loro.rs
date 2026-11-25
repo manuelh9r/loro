@@ -170,6 +170,11 @@ impl LoroDoc {
     where
         F: FnOnce() -> R,
     {
+        // The implicit commit may release the txn lock while it emits the
+        // commit's events, with no transaction in place. The writer gate keeps
+        // other threads' edits and commit options out of that window, so they
+        // go into the renewed transaction, not into this commit.
+        let _exclusive = self.txn.lock_exclusive();
         let (options, guard) = self.implicit_commit_then_stop();
         // `f` may call user code, e.g. subscribers of an import's events. If it
         // panics, release the txn lock first, so the panic does not poison it.
@@ -177,8 +182,15 @@ impl LoroDoc {
         // renewal panic too; `DeferredPanic` keeps the first one.
         let mut panic = DeferredPanic::default();
         let result = panic.run(f);
-        drop(guard);
-        panic.run(|| self.renew_txn_if_auto_commit(options));
+        if panic.has_panic() {
+            drop(guard);
+            panic.run(|| self.renew_txn_if_auto_commit(options));
+        } else {
+            // Renew before the txn lock is released: an edit of another thread
+            // that took the lock in between would start a transaction without
+            // the preserved options (the next commit's message or timestamp).
+            panic.run(|| self._renew_txn_if_auto_commit_with_guard(options, guard));
+        }
         panic.resume();
         result.unwrap()
     }
@@ -2399,6 +2411,8 @@ impl LoroDoc {
             validate_frontiers(b)?;
         }
 
+        // See `with_barrier`.
+        let _exclusive = self.txn.lock_exclusive();
         let (options, txn) = self.implicit_commit_then_stop();
         let was_detached = self.is_detached();
         let old_frontiers = self.state_frontiers();
@@ -2427,13 +2441,17 @@ impl LoroDoc {
         // Always restore state regardless of whether diff calculation succeeded
         self._checkout_without_emitting(&old_frontiers, false, false)
             .unwrap();
-        drop(txn);
-        if !was_detached {
-            self.set_detached(false);
-            self.renew_txn_if_auto_commit(options);
-        }
         if was_recording {
             self.state.lock().start_recording();
+        }
+        // Attach and renew before the txn lock is released: the restoring
+        // checkout leaves the doc detached, and an edit that takes the lock next
+        // must find it attached, with a transaction to write into.
+        if !was_detached {
+            self.set_detached(false);
+            self._renew_txn_if_auto_commit_with_guard(options, txn);
+        } else {
+            drop(txn);
         }
         result
     }
