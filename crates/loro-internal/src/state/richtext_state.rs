@@ -87,7 +87,7 @@ impl RichtextState {
     /// This uses `mut` because we may need to build the state from snapshot
     #[inline]
     pub fn to_string_mut(&mut self) -> String {
-        self.state.get_mut().to_string()
+        self.state.get_mut().to_plain_string()
     }
 
     #[allow(unused)]
@@ -1017,7 +1017,7 @@ impl ContainerState for RichtextState {
     fn get_value(&mut self) -> LoroValue {
         match &self.state {
             LazyLoad::Src(loader) => loader.to_plain_string().into(),
-            LazyLoad::Dst(_) => self.state.get_mut().to_string().into(),
+            LazyLoad::Dst(_) => self.state.get_mut().to_plain_string().into(),
         }
     }
 

@@ -44,6 +44,20 @@ pub(crate) struct RichtextState {
     cached_cursor: Option<CachedCursor>,
 }
 
+impl RichtextState {
+    /// The plain text, like `to_string()` but in one allocation of the right
+    /// size and without the formatting machinery (values, `LoroText::to_string`).
+    pub(crate) fn to_plain_string(&self) -> String {
+        let mut ans = String::with_capacity(self.len_utf8());
+        for span in self.tree.iter() {
+            if let RichtextStateChunk::Text(s) = span {
+                ans.push_str(s.as_str());
+            }
+        }
+        ans
+    }
+}
+
 impl Display for RichtextState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for span in self.tree.iter() {
